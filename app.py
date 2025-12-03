@@ -1,27 +1,36 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 import requests
 from bs4 import BeautifulSoup
 import re
 import random
-import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 
-# --- Helper: Scrape One Course ---
-def get_course_details(target_url):
+def scrape_course_by_id(course_id):
+    # Try to build a URL with this ID
+    # Structure seems to be: /eu/programme/{id}/eu (or similar country codes)
+    url = f"https://programmes.eurodesk.eu/eu/programme/{course_id}/eu"
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
+    
     try:
-        response = requests.get(target_url, headers=headers, timeout=10)
-        if response.status_code != 200: return None
+        response = requests.get(url, headers=headers, timeout=5)
+        # If the ID doesn't exist, Eurodesk might redirect or show 404
+        if response.status_code != 200: 
+            return None
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Title
+        
+        # Check if we actually found a valid page (look for the Title)
         title_tag = soup.find('div', class_='text-2xl font-bold uppercase')
-        title = title_tag.get_text(strip=True) if title_tag else (soup.find('h1').get_text(strip=True) if soup.find('h1') else "Title Not Found")
-
-        # Body
+        if not title_tag:
+            return None # It was a 200 OK page but empty/error page
+            
+        title = title_tag.get_text(strip=True)
+        
+        # Grab Description
         content_div = soup.find('div', attrs={'data-role': 'body'})
         description, deadline = "", "See link"
         if content_div:
@@ -30,74 +39,44 @@ def get_course_details(target_url):
             match = re.search(r'Deadlines?:(.*?)(?=\n|$)', text_content, re.IGNORECASE | re.DOTALL)
             if match:
                  deadline = match.group(1).strip()[:100]
-        else:
-            description = "Could not locate body."
-
-        # Image
+        
+        # Grab Image
         image_url = ""
         meta_image = soup.find("meta", property="og:image")
         if meta_image: image_url = meta_image["content"]
-        if image_url and image_url.startswith('/'): image_url = "https://programmes.eurodesk.eu" + image_url
+        if image_url and image_url.startswith('/'): 
+            image_url = "https://programmes.eurodesk.eu" + image_url
 
         return {
             "title": title,
             "description": description[:3000],
             "deadline": deadline,
             "image": image_url,
-            "link": target_url
+            "link": url
         }
-    except Exception as e:
-        print(f"Error scraping course: {e}")
+    except:
         return None
 
-# --- Main Endpoint: Use Sitemap to find links ---
-@app.route('/scrape_random', methods=['POST'])
+@app.route('/scrape_random', methods=['POST', 'GET'])
 def scrape_random_course():
-    try:
-        # 1. We check the Eurodesk Sitemap (The master map of all pages)
-        sitemap_url = "https://programmes.eurodesk.eu/sitemap.xml"
-        
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(sitemap_url, headers=headers, timeout=10)
-        
-        if response.status_code != 200:
-             return jsonify({"error": "Could not access sitemap"}), 500
-
-        # 2. Parse the XML to find links
-        # The sitemap structure usually has <loc> tags inside <url> tags
-        root = ET.fromstring(response.content)
-        
-        # XML namespaces can be tricky, so we ignore them by searching for all tags ending in 'loc'
-        all_urls = []
-        for elem in root.iter():
-            if elem.tag.endswith('loc') and elem.text:
-                url = elem.text
-                # Filter: Only keep URLs that are actual programmes
-                if "/programme/" in url:
-                    all_urls.append(url)
-
-        if not all_urls:
-            return jsonify({"error": "No programme links found in sitemap"}), 404
-
-        # 3. Pick ONE random link
-        selected_url = random.choice(all_urls)
-
-        # 4. Scrape it
-        result = get_course_details(selected_url)
+    # We will try up to 10 random IDs to find a winner
+    attempts = 0
+    max_attempts = 15
+    
+    # Based on current Eurodesk IDs (approx 20000 to 24000 are recent)
+    min_id = 21000
+    max_id = 24000
+    
+    while attempts < max_attempts:
+        random_id = random.randint(min_id, max_id)
+        result = scrape_course_by_id(random_id)
         
         if result:
-             return jsonify({"status": "success", "data": result})
-        else:
-             # If the first random one failed (maybe expired), try one more time
-             second_try = random.choice(all_urls)
-             result_2 = get_course_details(second_try)
-             if result_2:
-                 return jsonify({"status": "success", "data": result_2})
-             else:
-                 return jsonify({"error": "Failed to scrape random course"}), 500
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            return jsonify({"status": "success", "attempts": attempts+1, "data": result})
+        
+        attempts += 1
+        
+    return jsonify({"error": "Could not find a valid course after multiple guesses"}), 404
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
