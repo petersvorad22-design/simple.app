@@ -1,4 +1,5 @@
+flask
+gunicorn
 curl-cffi
 beautifulsoup4
 requests
-gunicorn
