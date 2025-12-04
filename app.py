@@ -1,103 +1,135 @@
-import random
-from flask import Flask, jsonify
-from curl_cffi import requests as cffi_requests
+import requests
 from bs4 import BeautifulSoup
-
-app = Flask(__name__)
+import schedule
+import time
+from datetime import datetime
 
 # --- CONFIGURATION ---
+# The URL where the list of courses is located
 BASE_URL = "https://www.salto-youth.net"
-BROWSE_URL = "https://www.salto-youth.net/tools/european-training-calendar/browse/"
+CALENDAR_URL = "https://www.salto-youth.net/tools/european-training-calendar/search/"
 
-def clean_dom(soup):
+def get_newest_course_link():
     """
-    Surgically removes headers, footers, sidebars, and menus 
-    so only the main content remains.
+    Fetches the main calendar page and finds the link to the top/newest course.
     """
-    # List of "Noise" classes usually found on SALTO (Sidebars, Menus, Footers)
-    noise_selectors = [
-        ".region-sidebar-first",  # The left sidebar (About SALTO, etc.)
-        ".region-sidebar-second", # Right sidebar
-        "#footer",                # The bottom footer
-        ".utility-menu",          # Top menu
-        ".branding",              # Logo area
-        ".tabs",                  # "View / Edit" tabs
-        ".breadcrumb"             # Navigation path
-    ]
-    
-    # Destroy them!
-    for selector in noise_selectors:
-        for element in soup.select(selector):
-            element.decompose() # This deletes the element from the HTML completely
-            
-    return soup
-
-def get_random_course_data():
-    session = cffi_requests.Session(impersonate="chrome")
-    
+    print("Checking for new courses...")
     try:
-        # 1. Get List of Courses
-        print("🔍 Scanning course list...")
-        response = session.get(BROWSE_URL, timeout=30)
-        soup = BeautifulSoup(response.text, "html.parser")
+        response = requests.get(CALENDAR_URL)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Find all valid course links
-        all_links = soup.find_all("a", href=True)
-        course_links = [
-            link['href'] for link in all_links 
-            if "/tools/european-training-calendar/training/" in link['href'] 
-            and "apply" not in link['href'] 
-            and ".html" not in link['href']
-        ]
-
-        if not course_links:
-            return {"error": "No courses found"}
-
-        # 2. Pick ONE Random Course
-        random_path = random.choice(course_links)
-        full_url = random_path if random_path.startswith("http") else f"{BASE_URL}{random_path}"
-        print(f"🎲 Selected: {full_url}")
-
-        # 3. Scrape Details
-        detail_response = session.get(full_url, timeout=30)
-        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
-
-        # --- NEW: RUN THE CLEANER ---
-        detail_soup = clean_dom(detail_soup)
-
-        # Extract Title
-        title = detail_soup.find("h1").get_text(strip=True) if detail_soup.find("h1") else "No Title"
+        # NOTE: You must inspect the website to get the exact CSS selector.
+        # This is a generic example assuming the first link in a table is the newest.
+        # Look for the specific HTML class used for course titles on the site.
+        # Example selector: 'table.training-list tr a.training-title'
+        newest_link_tag = soup.select_one('.training-list-content a') 
         
-        # Extract Main Content
-        # We target the specific content box 'training-view'. 
-        # If not found, we use 'content' ID but the noise is already deleted by clean_dom
-        content_area = detail_soup.find("div", class_="training-view") or detail_soup.find("div", id="content") or detail_soup.body
+        if newest_link_tag:
+            link = newest_link_tag['href']
+            # Ensure the link is absolute
+            if not link.startswith("http"):
+                link = BASE_URL + link
+            return link
+        else:
+            print("No course links found.")
+            return None
+    except Exception as e:
+        print(f"Error fetching list: {e}")
+        return None
+
+def scrape_course_details(url):
+    """
+    Visits the specific course page and extracts details.
+    """
+    print(f"Scraping details from: {url}")
+    try:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # --- EXTRACTION LOGIC ---
+        # Adjust these selectors based on the actual HTML of the page
         
-        full_text = content_area.get_text(separator="\n", strip=True)
+        # 1. Title
+        title = soup.find('h1').get_text(strip=True)
+        
+        # 2. Description (Usually in a specific div)
+        # We take the first 300 chars for the prompt to keep it concise
+        description_div = soup.select_one('.content-text') # specific class needed
+        description = description_div.get_text(strip=True)[:300] if description_div else "No description found."
 
-        # 4. FINAL SAFETY CUT
-        # If "About SALTO" still survives, we cut everything after it using text splitting
-        if "About SALTO" in full_text:
-            full_text = full_text.split("About SALTO")[0]
-
+        # 3. Dates/Location
+        # Example: looking for a div with class 'training-date'
+        date_info = soup.select_one('.date-display').get_text(strip=True) if soup.select_one('.date-display') else "Date unknown"
+        
         return {
             "title": title,
-            "url": full_url,
-            "full_text": full_text[:4000] # Limit text size for AI
+            "description": description,
+            "date": date_info,
+            "url": url
         }
-
     except Exception as e:
-        return {"error": str(e)}
+        print(f"Error scraping details: {e}")
+        return None
 
-# --- WEB SERVER ROUTES ---
-@app.route('/')
-def home():
-    return "✅ Scraper is Alive (Clean Version). Go to /scrape"
+def generate_image_prompt(course_data):
+    """
+    Creates an image prompt based on the extracted text + your specific style preference.
+    """
+    title = course_data['title']
+    desc_snippet = course_data['description']
+    
+    # --- PROMPT ENGINEERING ---
+    # Integrating your "Bubble Style" preference with the course topic
+    
+    prompt = (
+        f"Design a modern, 3D abstract illustration for a workshop titled '{title}'. "
+        f"The theme involves: {desc_snippet}... "
+        f"Key visual elements: Use a consistent style with floating semi-transparent bubbles, "
+        f"soft gradients in blue and white, clean corporate memphis style, "
+        f"high resolution, minimalist background."
+    )
+    
+    return prompt
 
-@app.route('/scrape')
-def scrape():
-    data = get_random_course_data()
-    return jsonify(data)
+def job():
+    """
+    The main task to run daily.
+    """
+    print(f"--- Starting Job: {datetime.now()} ---")
+    
+    # 1. Get the link
+    link = get_newest_course_link()
+    
+    if link:
+        # 2. Get the details
+        details = scrape_course_details(link)
+        
+        if details:
+            # 3. Create the prompt
+            image_prompt = generate_image_prompt(details)
+            
+            # 4. Output (In a real scenario, this could email you or save to a file)
+            print("\n--- RESULTS ---")
+            print(f"Course: {details['title']}")
+            print(f"URL: {details['url']}")
+            print(f"Generated Image Prompt:\n{image_prompt}")
+            print("----------------")
+            
+            # Optional: Save to a log file
+            with open("daily_course_log.txt", "a") as f:
+                f.write(f"{datetime.now()} | {details['title']} | {image_prompt}\n")
+                
+    else:
+        print("Could not find a link to process.")
 
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=10000)
+# --- SCHEDULER ---
+# Runs the 'job' function every day at 09:00 AM
+schedule.every().day.at("09:00").do(job)
+
+print("Scheduler started. Waiting for 09:00 AM... (Press Ctrl+C to stop)")
+
+# Keep the script running
+while True:
+    schedule.run_pending()
+    time.sleep(60)
