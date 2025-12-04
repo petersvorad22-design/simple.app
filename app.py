@@ -1,135 +1,99 @@
 import requests
 from bs4 import BeautifulSoup
-import schedule
 import time
-from datetime import datetime
 
 # --- CONFIGURATION ---
-# The URL where the list of courses is located
 BASE_URL = "https://www.salto-youth.net"
-CALENDAR_URL = "https://www.salto-youth.net/tools/european-training-calendar/search/"
+# This is the page that lists all current trainings
+LIST_URL = "https://www.salto-youth.net/tools/european-training-calendar/browse/"
 
-def get_newest_course_link():
-    """
-    Fetches the main calendar page and finds the link to the top/newest course.
-    """
-    print("Checking for new courses...")
+# Headers make the script look like a real Chrome browser to avoid being blocked
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+
+def find_newest_course():
+    print(f"1. Accessing calendar list: {LIST_URL}")
     try:
-        response = requests.get(CALENDAR_URL)
+        response = requests.get(LIST_URL, headers=HEADERS)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # NOTE: You must inspect the website to get the exact CSS selector.
-        # This is a generic example assuming the first link in a table is the newest.
-        # Look for the specific HTML class used for course titles on the site.
-        # Example selector: 'table.training-list tr a.training-title'
-        newest_link_tag = soup.select_one('.training-list-content a') 
+        # SMART SEARCH: Find the first link that looks like a training course
+        # We look for 'a' tags where the href contains '/training/' but isn't a search link
+        all_links = soup.find_all('a', href=True)
         
-        if newest_link_tag:
-            link = newest_link_tag['href']
-            # Ensure the link is absolute
-            if not link.startswith("http"):
-                link = BASE_URL + link
-            return link
+        course_link = None
+        for link in all_links:
+            href = link['href']
+            # Filter for actual training pages (avoiding admin/search links)
+            if "/tools/european-training-calendar/training/" in href and "search" not in href:
+                course_link = href
+                if not course_link.startswith("http"):
+                    course_link = BASE_URL + course_link
+                break # We take the first one found (usually the top of the list)
+
+        if course_link:
+            print(f"   Found newest course link: {course_link}")
+            return course_link
         else:
-            print("No course links found.")
+            print("   ❌ No training links found on the browse page.")
             return None
+
     except Exception as e:
-        print(f"Error fetching list: {e}")
+        print(f"   Error fetching list: {e}")
         return None
 
-def scrape_course_details(url):
-    """
-    Visits the specific course page and extracts details.
-    """
-    print(f"Scraping details from: {url}")
+def get_course_details(url):
+    print(f"2. Scraping details from: {url}")
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=HEADERS)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # --- EXTRACTION LOGIC ---
-        # Adjust these selectors based on the actual HTML of the page
-        
-        # 1. Title
+        # 1. Get Title (H1 is usually the main title)
         title = soup.find('h1').get_text(strip=True)
         
-        # 2. Description (Usually in a specific div)
-        # We take the first 300 chars for the prompt to keep it concise
-        description_div = soup.select_one('.content-text') # specific class needed
-        description = description_div.get_text(strip=True)[:300] if description_div else "No description found."
+        # 2. Get Description
+        # We grab all paragraph text to be safe, then limit it to 300 chars
+        all_text = soup.find_all('p')
+        description = " ".join([p.get_text(strip=True) for p in all_text])
+        # Clean up and shorten
+        short_desc = description[:400] + "..." if len(description) > 400 else description
 
-        # 3. Dates/Location
-        # Example: looking for a div with class 'training-date'
-        date_info = soup.select_one('.date-display').get_text(strip=True) if soup.select_one('.date-display') else "Date unknown"
-        
-        return {
-            "title": title,
-            "description": description,
-            "date": date_info,
-            "url": url
-        }
+        return {"title": title, "description": short_desc, "url": url}
+
     except Exception as e:
-        print(f"Error scraping details: {e}")
+        print(f"   Error reading page details: {e}")
         return None
 
-def generate_image_prompt(course_data):
-    """
-    Creates an image prompt based on the extracted text + your specific style preference.
-    """
-    title = course_data['title']
-    desc_snippet = course_data['description']
-    
-    # --- PROMPT ENGINEERING ---
-    # Integrating your "Bubble Style" preference with the course topic
-    
+def generate_prompt(data):
+    print("3. Generating Image Prompt...")
+    # Your Saved Preference: Bubble Style
     prompt = (
-        f"Design a modern, 3D abstract illustration for a workshop titled '{title}'. "
-        f"The theme involves: {desc_snippet}... "
-        f"Key visual elements: Use a consistent style with floating semi-transparent bubbles, "
-        f"soft gradients in blue and white, clean corporate memphis style, "
-        f"high resolution, minimalist background."
+        f"**IMAGE PROMPT:**\n"
+        f"Design a modern, 3D abstract illustration for a European training course titled '{data['title']}'. "
+        f"Context of the event: {data['description']}\n\n"
+        f"**Style Requirements:**\n"
+        f"Use floating semi-transparent bubbles, soft gradients in blue and white, "
+        f"clean corporate memphis style, high resolution, minimalist background."
     )
-    
     return prompt
 
-def job():
-    """
-    The main task to run daily.
-    """
-    print(f"--- Starting Job: {datetime.now()} ---")
-    
-    # 1. Get the link
-    link = get_newest_course_link()
+# --- MAIN EXECUTION (RUNS ONCE IMMEDIATELY) ---
+if __name__ == "__main__":
+    link = find_newest_course()
     
     if link:
-        # 2. Get the details
-        details = scrape_course_details(link)
-        
+        details = get_course_details(link)
         if details:
-            # 3. Create the prompt
-            image_prompt = generate_image_prompt(details)
-            
-            # 4. Output (In a real scenario, this could email you or save to a file)
-            print("\n--- RESULTS ---")
-            print(f"Course: {details['title']}")
-            print(f"URL: {details['url']}")
-            print(f"Generated Image Prompt:\n{image_prompt}")
-            print("----------------")
-            
-            # Optional: Save to a log file
-            with open("daily_course_log.txt", "a") as f:
-                f.write(f"{datetime.now()} | {details['title']} | {image_prompt}\n")
-                
+            final_prompt = generate_prompt(details)
+            print("\n" + "="*40)
+            print("SUCCESS! HERE IS YOUR DATA:")
+            print("="*40)
+            print(f"Title: {details['title']}")
+            print(f"Link:  {details['url']}")
+            print("-" * 20)
+            print(final_prompt)
+            print("="*40)
     else:
-        print("Could not find a link to process.")
-
-# --- SCHEDULER ---
-# Runs the 'job' function every day at 09:00 AM
-schedule.every().day.at("09:00").do(job)
-
-print("Scheduler started. Waiting for 09:00 AM... (Press Ctrl+C to stop)")
-
-# Keep the script running
-while True:
-    schedule.run_pending()
-    time.sleep(60)
+        print("Scraping failed.")
