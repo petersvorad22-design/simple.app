@@ -1,4 +1,3 @@
-Flask
-requests
+curl-cffi
 beautifulsoup4
-gunicorn
+requests
